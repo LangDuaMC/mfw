@@ -1,0 +1,12 @@
+[package]
+name = "mfw"
+version = "0.1.0"
+edition = "2024"
+default-run = "mfw"
+
+[[bin]]
+name = "mfw-ports"
+
+[dependencies]
+clap = { version = "4.5.28", features = ["derive"] }
+clap_derive = "4.5.28"
