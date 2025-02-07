@@ -10,6 +10,7 @@ a static iptables-companion act as a firewall
 
 ```sh
 curl -L https://github.com/LangDuaMC/mfw/releases/download/0.1.1/mfw.tar.gz -o- | sudo tar -xvzC/usr/bin
+sudo chmod u+x /usr/bin/mfw*
 ```
 
 ## hawk to? *(lazy)*
