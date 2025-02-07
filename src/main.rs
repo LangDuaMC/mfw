@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use std::{fs, io};
 
@@ -18,18 +20,30 @@ struct Args {
 
     #[clap(short, long)]
     dry_run: bool,
+
+    #[clap(short, long)]
+    no_cache: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Generate a set of command, shorthand to "--verbose --dry-run apply"
+    #[clap(aliases = &["gen", "preview", "build"])]
     Generate,
 
+    /// Apply your rule
+    #[clap(aliases = &["deploy", "ship", "up"])]
     Apply,
 
-    Install,
+    /// Bring mfw to its clean state
+    #[clap(aliases = &["disable", "down"])]
+    Clean,
+
+    /// Remove every mfw rule (why would you do it?)
+    Uninstall,
 }
 
-fn exec_bash(script: String) -> Result<(), io::Error> {
+fn exec_bash(script: &str) -> Result<(), io::Error> {
     if std::env::consts::OS == "linux" {
         let status = std::process::Command::new("bash")
             .arg("-c")
@@ -77,25 +91,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.command {
         Commands::Generate => {
-            let script = generate_script(&rules, &default_chains, prefix);
+            let script = generate_script(args.verbose, &rules, &default_chains, prefix);
             println!("{script}");
         }
         Commands::Apply => {
-            let script = generate_script(&rules, &default_chains, prefix);
+            let script = generate_script(args.verbose, &rules, &default_chains, prefix);
             if args.verbose {
                 println!("{script}");
             }
             if !args.dry_run {
-                exec_bash(script)?;
+                exec_bash(&script)?;
+            }
+            if !args.no_cache {
+                File::create(args.rulefile + ".sh")
+                    .unwrap()
+                    .write_all(&script.as_bytes())
+                    .unwrap();
             }
         }
-        Commands::Install => {
-            let install_script = generate_install_script(&default_chains, prefix);
+        Commands::Clean => {
+            let install_script = generate_clean_script(args.verbose, &default_chains, prefix);
             if args.verbose {
                 println!("{install_script}");
             }
             if !args.dry_run {
-                exec_bash(install_script)?;
+                exec_bash(&install_script)?;
+            }
+        }
+        Commands::Uninstall => {
+            let uninstall_script = generate_uninstall_script(args.verbose, prefix);
+            if args.verbose {
+                println!("{uninstall_script}");
+            }
+            if !args.dry_run {
+                exec_bash(&uninstall_script)?;
             }
         }
     }
@@ -126,11 +155,12 @@ fn load_rules(rule_file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>
 
 /// Generate the iptables script
 fn generate_script(
+    verbose: bool,
     rules: &[String],
     default_chains: &HashMap<&str, Vec<&str>>,
     prefix: &str,
 ) -> String {
-    let mut script = generate_install_script(default_chains, prefix);
+    let mut script = generate_clean_script(verbose, default_chains, prefix);
     let mut defined_chains = HashSet::new();
     script.push('\n');
 
@@ -152,19 +182,18 @@ fn generate_script(
                     .next()
                     .unwrap()
                     .trim_start_matches(':');
-                defined_chains.insert(chain.to_string());
 
                 if let Some(default_chains) = default_chains.get(table.as_str()) {
-                    if !default_chains.contains(&chain) {
-                        // Clean up and recreate the custom chain
+                    if !default_chains.contains(&chain) && !defined_chains.contains(chain) {
                         script.push_str(&format!(
-                            "iptables -t filter -F {prefix}{chain} 2>/dev/null || true\n\
-                            iptables -t filter -X {prefix}{chain} 2>/dev/null || true\n\
-                            iptables -t filter -N {prefix}{chain}\n",
+                            "iptables -t {table} -F {prefix}{chain} 2>/dev/null || true\n\
+                            iptables -t {table} -X {prefix}{chain} 2>/dev/null || true\n\
+                            iptables -t {table} -N {prefix}{chain}\n",
                         ));
-                        continue;
                     }
                 }
+
+                defined_chains.insert(chain.to_string());
             }
             Some('-') => {
                 let mut processed_line = line.clone();
@@ -183,25 +212,37 @@ fn generate_script(
     script
 }
 
-/// Generate the install script for default rules
-fn generate_install_script(default_chains: &HashMap<&str, Vec<&str>>, prefix: &str) -> String {
-    let mut script = String::new();
-    script.push_str(&format!(
+fn generate_uninstall_script(verbose: bool, prefix: &str) -> String {
+    format!(
         "#!/usr/bin/bash\n\
-        # Cleanup existing prefixed chains\n\
-        for table in filter nat mangle raw security; do\n\
-        iptables -t $table -S | grep -E '^:({prefix}|\\S+_{prefix})' | cut -d' ' -f1 | sed 's/://' | while read chain; do\n\
-        iptables -t $table -F \"$chain\"\n\
-        iptables -t $table -X \"$chain\"\n\
-        done\n\
-        done\n"
-    ));
+        #\n\
+        # MFW Generated\n\
+        #\n\n\
+        {}\n\
+        # Clean up\n\
+        for t in filter nat mangle raw security;do \
+        iptables -S -t$t|grep \"\\-j {prefix}\"|sed 's/-A/-D/'|while read r;do iptables -t$t $r;done;\
+        iptables -S -t$t|grep \"\\-N {prefix}\"|cut -d\\  -f2|while read c;do iptables -t$t -F $c&&iptables -t$t -X$c;done;\
+        done\n\n",
+        if verbose { "set -x" } else { "" }
+    )
+}
+
+/// Generate the install script for default rules
+fn generate_clean_script(
+    verbose: bool,
+    default_chains: &HashMap<&str, Vec<&str>>,
+    prefix: &str,
+) -> String {
+    let mut script = String::new();
+
+    script.push_str(generate_uninstall_script(verbose, prefix).as_str());
 
     script.push_str("# Create prefixed chains and setup jumps\n");
     for (table, chains) in default_chains {
         for chain in chains {
             script.push_str(&format!(
-                "iptables -t {table} -N {prefix}{chain} 2>/dev/null || true\n\
+                "iptables -t {table} -N {prefix}{chain}\n\
                 iptables -t {table} -A {chain} -j {prefix}{chain}\n"
             ));
         }

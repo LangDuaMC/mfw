@@ -2,7 +2,7 @@
 
 a static iptables-companion act as a firewall
 
-output is determinism
+output is determinism. it manage your iptables file, and never mess it up. it play nice with docker and any friends. it has room to intergrate any external iptables rules.
 
 ## hawk to?
 
